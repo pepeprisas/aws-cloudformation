@@ -1,0 +1,327 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Creates a main VPC with a public subnet, VPC endpoints and an Internet gateway.", 
+    "Parameters": {
+      "VpcCIDR" : {
+            "Description": "VPC CIDR. Reserve a /16 subnet for the VPC.",
+            "MinLength": "7",
+            "Type": "String",
+            "Default" : "172.16.0.0/16" 
+        },
+        "VPCInternetGateway": {
+                "AllowedValues": [
+                    "true",
+                    "false"
+                ],
+            "Default": "true",
+            "Description": "Set to true for creating an Internet Gateway, ",
+            "Type": "String"
+        },
+        "AZ": {
+            "AllowedValues": [
+                "eu-west-1a",
+                "eu-west-1b",
+                "eu-west-1c",
+                "eu-west-2a",
+                "eu-west-2b",
+                "eu-west-2c",
+                "sa-east-1a",
+                "sa-east-1b",
+                "sa-east-1c"
+            ],
+            "ConstraintDescription": "Must be a valid AWS availability zone",
+            "Default": "eu-west-1a",
+            "Description": "Availability Zone of the main public subnet",
+            "MinLength": "1",
+            "Type": "String"
+        },
+        "PublicSubnetCIDR": {
+            "Description": "Main public subnet CIDR. Use /28 mask for subnets (15 addresses).",
+            "Type": "String",
+            "Default": "172.16.0.0/28"
+        },
+        "S3Endpoint": {
+            "AllowedValues": [
+              "true",
+                "false"
+            ],
+            "Default": "true",
+            "Description": "Set to true for creating an S3 VPC Endpoint",
+            "Type": "String"
+        },
+        "DynamoDBEndpoint": {
+            "AllowedValues": [
+                "true",
+                "false"
+            ],
+            "Default": "true",
+            "Description": "Set to true for creating a Dynamo DB VPC Endpoint",
+            "Type": "String"
+        }
+    },
+    "Conditions" : {
+        "S3_Enpoint" : {"Fn::Equals" : [{"Ref" : "S3Endpoint"}, "true"]},
+        "DynamoDB_Endpoint" : {"Fn::Equals" : [{"Ref" : "DynamoDBEndpoint"}, "true"]}
+      },
+    "Resources": {
+        "VPC" : {
+          "Type" : "AWS::EC2::VPC",
+          "Properties" : {
+            "CidrBlock" : { "Ref" : "VpcCIDR" },
+            "Tags": [
+                      {
+                          "Key": "Name",
+                          "Value": { "Fn::Join" : [ "-", [ { "Ref": "AWS::StackName" } ] ]}
+                      }
+                  ],
+            "EnableDnsSupport" : "true",
+            "EnableDnsHostnames" : "true"
+          }
+        },
+        "vpcDHCPOptionsSet" : {
+            "Type" : "AWS::EC2::DHCPOptions",
+            "Properties" : {
+                "DomainName" : {
+                  "Fn::Join": [
+                      "",
+                      [
+                          {
+                              "Ref": "AWS::Region"
+                          },
+                          ".compute.internal"
+                      ]
+                  ]                  
+                },
+                "DomainNameServers" : [ "AmazonProvidedDNS" ]
+            }
+        },
+        "vpcDHCPOptionsSetAssociation": { 
+            "Type" : "AWS::EC2::VPCDHCPOptionsAssociation",
+            "Properties" : {
+               "DhcpOptionsId" : { "Ref" : "vpcDHCPOptionsSet" },
+               "VpcId" : { "Ref" : "VPC" }
+            }
+        },
+        "VPCIG":{
+            "Type" : "AWS::EC2::InternetGateway"                
+        },
+        "VPCInternetGatewayAttachement" : {
+            "Type" : "AWS::EC2::VPCGatewayAttachment",
+            "Properties" : {
+                "VpcId" : { "Ref" : "VPC" },
+                "InternetGatewayId" : { "Ref" : "VPCIG" }
+            }
+        },  
+        "PrimitiveRouteTablePublic": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": { "Ref": "VPC"},
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "PrimitiveRouteTablePublic"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "PrimitiveRouteTablePrivate": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": { "Ref": "VPC" },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "PrimitiveRouteTablePrivate"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "PublicRoute": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "PrimitiveRouteTablePublic"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": { "Ref": "VPCIG" }
+            }
+        },
+        "PrivateRoute": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "PrimitiveRouteTablePrivate"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "NatGatewayId": { "Ref": "NatGateway"
+                }
+            }
+        },
+        "PublicSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": { "Ref": "VPC" },
+                "CidrBlock": {
+                    "Ref": "PublicSubnetCIDR"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AZ"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "PublicSubnet"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "RouteTableAssociationPublicSubnet": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "RouteTableId": {
+                  "Ref": "PrimitiveRouteTablePublic"
+                },
+                "SubnetId": {
+                    "Ref": "PublicSubnet"
+                }
+            }
+        },
+        "ElasticIPNatGateway": {
+                "Type": "AWS::EC2::EIP",
+                "Properties" : {
+                        "Domain" : "vpc"
+                        }
+        },
+        "NatGateway": {
+            "Type" : "AWS::EC2::NatGateway",
+            "Properties" : {
+                "AllocationId" : { "Fn::GetAtt" :"ElasticIPNatGateway.AllocationId"},
+                "SubnetId" : { "Ref" : "PublicSubnet"},
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "NatGateway"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "VPCS3Endpoint" : {
+            "Type" : "AWS::EC2::VPCEndpoint",
+            "Condition" : "S3_Enpoint",
+            "Properties" : {
+                "ServiceName" : { "Fn::Join": [ "", [ "com.amazonaws.", { "Ref": "AWS::Region" }, ".s3" ] ] },
+                "VpcId" : {"Ref" : "VPC"},
+                "RouteTableIds" : [ {"Ref" : "PrimitiveRouteTablePublic"}, {"Ref" : "PrimitiveRouteTablePrivate"} ]
+            }
+        },  
+        "VPCDynamoDBEndpoint" : {
+            "Type" : "AWS::EC2::VPCEndpoint",
+            "Condition" : "DynamoDB_Endpoint",
+            "Properties" : {
+                "ServiceName" : { "Fn::Join": [ "", [ "com.amazonaws.", { "Ref": "AWS::Region" }, ".dynamodb" ] ] },
+                "VpcId" : {"Ref" : "VPC"},
+                "RouteTableIds" : [ {"Ref" : "PrimitiveRouteTablePublic"}, {"Ref" : "PrimitiveRouteTablePrivate"} ]
+            }
+        } 
+    },
+    "Outputs": {  
+        "VPCID": {
+            "Description": "ID for the VPC",
+            "Value": {
+                "Ref": "VPC"     
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-VPCID" }}
+        },
+        "VPCInternetGateway": {
+            "Description": "VPCInternetGateway ID",
+            "Value": {
+                "Ref": "VPCIG"     
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-VPCInternetGatewayID" }}
+        },
+        "S3Endpoint": {
+            "Description": "S3 Endpoint ID",
+            "Value": {
+                "Ref": "VPCS3Endpoint"     
+            },
+            "Condition" : "S3_Enpoint",
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-S3EndpointID" }}
+        },
+        "DynamoDBEndpoint": {
+            "Description": "DynamoDB Endpoint ID",
+            "Value": {
+                "Ref": "VPCDynamoDBEndpoint"     
+            },
+            "Condition" : "DynamoDB_Endpoint",
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-DynamoDBEndpointID" }}
+        },
+        "CIDR": {
+            "Description": "CIDR for the VPC",
+            "Value": {
+                "Ref": "VpcCIDR"     
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-CIDR" }}
+        },
+        "VPCSubnetPublicCIDR": {
+            "Description": "Public subnet for the VPC",
+            "Value": {
+                "Ref": "PublicSubnetCIDR"
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-PrimitivePublicSubnetCIDR" }}
+        },
+        "VPCRouteTablePublic": {
+            "Description": "Public RouteTable for the VPC",
+            "Value": {
+                "Ref": "PrimitiveRouteTablePublic"     
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-PrimitiveRouteTablePublic" }}
+        },
+        "VPCRouteTablePrivate": {
+            "Description": "Private RouteTable for the VPC",
+            "Value": {
+                "Ref": "PrimitiveRouteTablePrivate" 
+            },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-PrimitiveRouteTablePrivate" }}
+        }
+    }
+}

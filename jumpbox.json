@@ -1,0 +1,647 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Creates EC2 Jumpbox host inside an existing VPC's public subnet",
+  "Mappings": {
+    "RegionMap": {
+      "eu-west-1": {
+        "AMI": "ami-1a962263"
+      },
+      "eu-west-2": {
+        "AMI": "ami-e7d6c983"
+      },
+      "sa-east-1": {
+        "AMI": "ami-286f2a44"
+      }
+    }
+  },
+  "Parameters": {
+    "ParentVPCStackName": {
+      "Description": "Parent VPC stack to inherit values from (VPCID, CIDR, Endpoint IDs, etc...)",
+      "Type": "String",
+      "Default": "VPC"
+    },
+    "ParentSubnetStackName": {
+      "Description": "Parent Subnet stack name",
+      "Type": "String",
+      "Default": "SUBNETS"
+    },
+    "Stage": {
+      "Description": "Stage for the environment",
+      "Type": "String",
+      "AllowedValues": [
+        "poc",
+        "dev",
+        "ci",
+        "pre",
+        "prod"
+      ]
+    },
+    "EnvironmentName": {
+      "Description": "Environment this stack belongs to",
+      "Type": "String",
+      "Default": "AppServer"
+    },
+    "Version": {
+      "Description": "Version of the environment",
+      "Type": "String",
+      "Default": "0"
+    },
+    "InstanceType": {
+      "Description": "Jumpbox EC2 instance type",
+      "Type": "String",
+      "Default": "t2.micro",
+      "AllowedValues": [
+        "t2.micro",
+        "t2.small",
+        "t2.medium",
+        "t2.large",
+        "m3.medium",
+        "m3.large",
+        "m3.xlarge",
+        "m3.2xlarge"
+      ],
+      "ConstraintDescription": "Must be a valid EC2 HVM instance type"
+    },
+    "AZ": {
+      "Description": "AvailabilityZone",
+      "Type": "String",
+      "Default": "eu-west-1a",
+      "AllowedValues": [
+        "eu-west-1a",
+        "eu-west-1b",
+        "eu-west-1c",
+        "eu-west-2a",
+        "eu-west-2b",
+        "eu-west-2c",
+        "sa-east-1a",
+        "sa-east-1b"
+      ],
+      "ConstraintDescription": "Must be a valid Availability Zone"
+    },
+    "KeyBucket": {
+      "Description": "Bucket where keys are stored",
+      "Type": "String",
+      "Default": "cf-templates"
+    },
+    "SSHPublicKey": {
+      "Description": "SSH public key for ec2-user",
+      "Type": "String"
+    },
+    "KeyURI": {
+      "Default": "https://s3-eu-west-1.amazonaws.com/cf-templates/keys/id_rsa",
+      "Description": "S3 URI where Private key is stored",
+      "MinLength": "1",
+      "Type": "String"
+    },
+    "KnownHostsURI": {
+      "Default": "https://s3-eu-west-1.amazonaws.com/cf-templates/keys/known_host_github",
+      "Description": "S3 URI where known hosts file is stored",
+      "MinLength": "1",
+      "Type": "String"
+    },
+    "AnsibleVaultPassword": {
+      "Description": "Password for ansible vault encrypted files",
+      "NoEcho": "true",
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "JumpboxRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "root",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ec2:DescribeTags",
+                  "Resource": "*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "Access_to_keys",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": { "Fn::Join": [
+                    "",
+                    [
+                      "arn:aws:s3:::",
+                      {
+                        "Ref": "KeyBucket"
+                      },
+                      "/*"
+                    ]
+                  ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "EC2_describe",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": "ec2:Describe*",
+                  "Resource": "*",
+                  "Effect": "Allow"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "JumpboxProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "JumpboxRole"
+          }
+        ]
+      }
+    },
+    "JumpboxSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Enable SSH access via port 22",
+        "VpcId": {
+          "Fn::ImportValue": {
+            "Fn::Join": [
+              "-",
+              [
+                {
+                  "Ref": "ParentVPCStackName"
+                },
+                "VPCID"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "22",
+            "ToPort": "22",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "jumpbox",
+                  "sg"
+                ]
+              ]
+            }
+          },
+          {
+            "Key": "stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          },
+          {
+            "Key": "version",
+            "Value": {
+              "Ref": "Version"
+            }
+          },
+          {
+            "Key": "environment",
+            "Value": {
+              "Ref": "EnvironmentName"       
+            }
+          }
+        ]
+      }
+    },
+    "JumpboxIPAddress": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc"
+      }
+    },
+    "JumpboxIPAssoc": {
+      "Type": "AWS::EC2::EIPAssociation",
+      "Properties": {
+        "InstanceId": {
+          "Ref": "JumpboxHost"
+        },
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "JumpboxIPAddress",
+            "AllocationId"
+          ]
+        }
+      }
+    },
+    "JumpboxHost": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "JumpboxIPAddress"
+      ],
+      "Metadata": {
+        "AWS::CloudFormation::Authentication": {
+          "S3AccessCreds": {
+            "type": "S3",
+            "roleName": {
+              "Ref": "JumpboxRole"
+            }
+          }
+        },
+        "AWS::CloudFormation::Init": {
+          "config": {
+            "packages": {
+              "yum": {
+                "git": [
+                ]
+              }
+            },
+            "files": {
+              "/home/ec2-user/.ssh/authorized_keys": {
+                "content": {
+                  "Ref": "SSHPublicKey"
+                },
+                "mode": "000600",
+                "owner": "ec2-user",
+                "group": "ec2-user"
+              },
+              "/home/ec2-user/.ssh/id_rsa": {
+                "source": {
+                  "Ref": "KeyURI"
+                },
+                "mode": "000600",
+                "owner": "ec2-user",
+                "group": "ec2-user",
+                "authentication": "S3AccessCreds"
+              },
+              "/home/ec2-user/.ssh/known_hosts": {
+                "source": {
+                  "Ref": "KnownHostsURI"
+                },
+                "mode": "000600",
+                "owner": "ec2-user",
+                "group": "ec2-user",
+                "authentication": "S3AccessCreds"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "IamInstanceProfile": {
+          "Ref": "JumpboxProfile"
+        },
+        "NetworkInterfaces": [
+          {
+            "AssociatePublicIpAddress": "true",
+            "DeleteOnTermination": "true",
+            "Description": {
+              "Fn::Join": [
+                "-",
+                [
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "jumpbox",
+                  "nic"
+                ]
+              ]
+            },
+            "DeviceIndex": "0",
+            "GroupSet": [
+              {
+                "Ref": "JumpboxSecurityGroup"
+              }
+            ],
+            "SubnetId": {
+              "Fn::ImportValue": {
+                "Fn::Join": [
+                  "-",
+                  [
+                    {
+                      "Ref": "ParentSubnetStackName"
+                    },
+                    "PublicSubnet1ID"
+                  ]
+                ]
+              }
+            }
+          }
+        ],
+        "AvailabilityZone": {
+          "Ref": "AZ"
+        },
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "ImageId": {
+          "Fn::FindInMap": [
+            "RegionMap",
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "jumpbox"
+                ]
+              ]
+            }
+          },
+          {
+            "Key": "Description",
+            "Value": "EC2 Jumpbox Server"
+          },
+          {
+            "Key": "Contact",
+            "Value": "SRE Team"
+          },
+          {
+            "Key": "Workhours",
+            "Value": "24/7"
+          },
+          {
+            "Key": "stage",
+            "Value": {
+              "Ref": "Stage"
+            }
+          },
+          {
+            "Key": "version",
+            "Value": {
+              "Ref": "Version"
+            }
+          },
+          {
+            "Key": "environment",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "jumpbox"
+                ]
+              ]
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "Content-Type: multipart/mixed; boundary=\"===============3585321300151562773==\"\n",
+                "MIME-Version: 1.0\n",
+                "\n",
+                "--===============3585321300151562773==\n",
+                "Content-Type: text/cloud-config; charset=\"us-ascii\"\n",
+                "MIME-Version: 1.0\n",
+                "Content-Transfer-Encoding: 7bit\n",
+                "Content-Disposition: attachment; filename=\"cloud.cfg\"\n",
+                "\n",
+                "#cloud-config\n",
+                "repo_upgrade: none\n",
+                "\n",
+                "--===============3585321300151562773==\n",
+                "Content-Type: text/x-shellscript; charset=\"us-ascii\"\n",
+                "MIME-Version: 1.0\n",
+                "Content-Transfer-Encoding: 7bit\n",
+                "Content-Disposition: attachment; filename=\"script.sh\"\n",
+                "\n",
+                "#!/bin/bash\n",
+                "set -e\n",
+                "touch /tmp/userdata-running\n",
+                "################## INSTALL PACKAGES ##########\n",
+                "yum clean all\n",
+                "yum install -y git\n",
+                "yum install -y python-pip\n",
+                "sudo pip install ansible==2.4.1\n",
+                "################## CONFIGURE HOSTNAME ##########\n",
+                "sed -i.bak 's/HOSTNAME=localhost.localdomain/HOSTNAME=",
+                {
+                  "Fn::Join": [
+                    "-",
+                    [
+                      {
+                        "Ref": "EnvironmentName"
+                      },
+                      "jumpbox"
+                    ]
+                  ]
+                },
+                ".localdomain/' /etc/sysconfig/network\n",
+                "echo '127.0.0.1 ",
+                {
+                  "Fn::Join": [
+                    "-",
+                    [
+                      {
+                        "Ref": "EnvironmentName"
+                      },
+                      "jumpbox"
+                    ]
+                  ]
+                },
+                " localhost.localdomain localhost' > /etc/hosts.tmp\n",
+                "mv -f /etc/hosts.tmp /etc/hosts\n",
+                "hostname ",
+                {
+                  "Fn::Join": [
+                    "-",
+                    [
+                      {
+                        "Ref": "EnvironmentName"
+                      },
+                      "jumpbox"
+                    ]
+                  ]
+                },
+                ".localdomain\n",
+                "################## cfn-init ################\n",
+                "/opt/aws/bin/cfn-init --region ",
+                {
+                  "Ref": "AWS::Region"
+                },
+                "    -s ",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                " -r JumpboxHost ",
+                "\n",
+                "################## Clone ansible repository ####################\n",
+                "################## Notify end of script ######################\n",
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "/opt/aws/bin/cfn-signal -e $? \"",
+                      {
+                        "Fn::Base64": {
+                          "Ref": "JumpboxWaitHandle"
+                        }
+                      },
+                      "\""
+                    ]
+                  ]
+                },
+                "\n",
+                "--===============3585321300151562773==--"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "JumpboxWaitHandle": {
+      "Type": "AWS::CloudFormation::WaitConditionHandle"
+    },
+    "JumpboxWaitCondition": {
+      "Type": "AWS::CloudFormation::WaitCondition",
+      "DependsOn": "JumpboxHost",
+      "Properties": {
+        "Handle": {
+          "Ref": "JumpboxWaitHandle"
+        },
+        "Timeout": "2700"
+      }
+    }
+  },
+  "Outputs": {
+    "Environment": {
+      "Value": {
+        "Ref": "EnvironmentName"
+      }
+    },
+    "Stage": {
+      "Value": {
+        "Ref": "Stage"
+      }
+    },
+    "Version": {
+      "Value": {
+        "Ref": "Version"
+      }
+    },
+    "JumpboxHost": {
+      "Value": {
+        "Ref": "JumpboxHost"
+      },
+      "Description": "ID for EC2 Jumpbox instance"
+    },
+    "JumpboxSG": {
+      "Value": {
+        "Ref": "JumpboxSecurityGroup"
+      },
+      "Description": "ID for EC2 Jumpbox security group",
+      "Export": {
+          "Name": {
+              "Fn::Sub": "${AWS::StackName}-JumpboxSG"
+          }
+      }
+    },
+    "KeyBucket": {
+      "Description": "Bucket where keys are stored",
+      "Value": {
+          "Ref": "KeyBucket"
+      },
+      "Export": {
+          "Name": {
+              "Fn::Sub": "${AWS::StackName}-KeyBucket"
+          }
+      }
+    },
+    "SSHPublicKey": {
+      "Description": "SSH public key for ec2-user",
+      "Value": {
+          "Ref": "SSHPublicKey"
+      },
+      "Export": {
+          "Name": {
+              "Fn::Sub": "${AWS::StackName}-SSHPublicKey"
+          }
+      }
+    },
+    "KeyURI": { 
+      "Description": "S3 URI where Private key is stored",
+      "Value": {
+          "Ref": "KeyURI"
+      },
+      "Export": {
+          "Name": {
+              "Fn::Sub": "${AWS::StackName}-KeyURI"
+          }
+      }
+    },
+    "KnownHostsURI": {
+      "Description": "S3 URI where Private key is stored",
+      "Value": {
+          "Ref": "KeyURI"
+      },
+      "Export": {
+          "Name": {
+              "Fn::Sub": "${AWS::StackName}-KnownHostsURI"
+          }
+      }
+    },
+    "AZ": {
+      "Value": {
+        "Ref": "AZ"
+      },
+      "Description": "Availability Zone where resources are deployed"
+    },
+    "JumpboxIPAddress": {
+      "Value": {
+        "Ref": "JumpboxIPAddress"
+      },
+      "Description": "EC2 Jumpbox Elastic IP address"
+    }
+  }
+}
